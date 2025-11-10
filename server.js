@@ -5,17 +5,17 @@ import { GoogleAuth } from 'google-auth-library';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-// Groq configuration (default behaviour retained for backwards compatibility)
-const GROQ_API_KEY = process.env.GROQ_API_KEY || process.env.GROQ_KEY;
-const GROQ_API_BASE = process.env.GROQ_API_BASE || 'https://api.groq.com/openai/v1';
 
-// Vertex AI (Generative Language / Gemini) configuration
+// Vertex AI (Gemini) configuration
 const VERTEX_API_KEY = process.env.VERTEX_API_KEY || process.env.GOOGLE_API_KEY || process.env.VERTEX_KEY;
-const VERTEX_API_BASE = process.env.VERTEX_API_BASE || 'https://generativelanguage.googleapis.com/v1beta';
-const VERTEX_DEFAULT_MODEL = process.env.VERTEX_MODEL || 'gemini-1.5-flash';
+const VERTEX_API_BASE = process.env.VERTEX_API_BASE || 'https://generativelanguage.googleapis.com/v1';
+const VERTEX_DEFAULT_MODEL = process.env.VERTEX_MODEL || 'gemini-2.5-flash';
 
 const vertexAuth = initialiseVertexAuth();
-const CHAT_PROVIDER = (process.env.CHAT_PROVIDER || (vertexAuth.mode !== 'none' ? 'vertex' : 'groq')).toLowerCase();
+
+if (vertexAuth.mode === 'none') {
+  console.warn('Vertex credentials not detected. Set VERTEX_API_KEY or VERTEX_SERVICE_ACCOUNT to enable responses.');
+}
 
 app.use(cors({
   origin: '*',
@@ -25,16 +25,13 @@ app.use(cors({
 app.use(express.json({ limit: '1mb' }));
 
 app.get('/api/health', (_req, res) => {
-  const hasKey = CHAT_PROVIDER === 'vertex'
-    ? vertexAuth.mode !== 'none'
-    : Boolean(GROQ_API_KEY);
-
   res.json({
     ok: true,
     service: 'hipolito-chat-backend',
-    provider: CHAT_PROVIDER,
-    hasKey,
-    authMode: CHAT_PROVIDER === 'vertex' ? vertexAuth.mode : 'apiKey'
+    provider: 'vertex',
+    hasCredentials: vertexAuth.mode !== 'none',
+    authMode: vertexAuth.mode,
+    model: VERTEX_DEFAULT_MODEL
   });
 });
 
@@ -44,77 +41,67 @@ app.post('/api/chat', async (req, res) => {
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: 'messages array is required' });
     }
-    if (CHAT_PROVIDER === 'vertex') {
-      if (vertexAuth.mode === 'none') {
-        return res.status(500).json({ error: 'Server missing Vertex credentials' });
-      }
-      if (stream) {
-        return res.status(400).json({ error: 'stream mode is not supported with Vertex AI' });
-      }
+    if (vertexAuth.mode === 'none') {
+      return res.status(500).json({ error: 'Server missing Vertex credentials' });
+    }
+    if (stream) {
+      return res.status(400).json({ error: 'stream mode is not supported with Vertex AI' });
+    }
 
-      const vertexModel = model || VERTEX_DEFAULT_MODEL;
-      const { contents, systemInstruction } = mapMessagesToVertex(messages);
-      if (contents.length === 0) {
-        return res.status(400).json({ error: 'Vertex requires at least one non-system message' });
+    const vertexModel = model || VERTEX_DEFAULT_MODEL;
+    const { contents, systemInstruction } = mapMessagesToVertex(messages);
+    if (contents.length === 0) {
+      return res.status(400).json({ error: 'Vertex requires at least one non-system message' });
+    }
+
+    const payload = {
+      contents,
+      generationConfig: {
+        temperature,
+        topP: top_p,
+        maxOutputTokens: max_tokens
       }
+    };
+    if (systemInstruction) {
+      payload.systemInstruction = systemInstruction;
+    }
 
-      const payload = {
-        contents,
-        generationConfig: {
-          temperature,
-          topP: top_p,
-          maxOutputTokens: max_tokens
-        }
-      };
-      if (systemInstruction) {
-        payload.systemInstruction = systemInstruction;
+    let vertexUrl = `${VERTEX_API_BASE}/models/${encodeURIComponent(vertexModel)}:generateContent`;
+    const headers = { 'Content-Type': 'application/json' };
+
+    if (vertexAuth.mode === 'apiKey') {
+      vertexUrl += `?key=${vertexAuth.apiKey}`;
+    } else if (vertexAuth.mode === 'serviceAccount') {
+      const accessToken = await vertexAuth.getAccessToken();
+      if (!accessToken) {
+        return res.status(500).json({ error: 'Vertex authentication failed: missing access token' });
       }
+      headers.Authorization = `Bearer ${accessToken}`;
+    }
 
-      let vertexUrl = `${VERTEX_API_BASE}/models/${encodeURIComponent(vertexModel)}:generateContent`;
-      const headers = { 'Content-Type': 'application/json' };
+    const resp = await fetch(vertexUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload)
+    });
 
-      if (vertexAuth.mode === 'apiKey') {
-        vertexUrl += `?key=${vertexAuth.apiKey}`;
-      } else if (vertexAuth.mode === 'serviceAccount') {
-        const accessToken = await vertexAuth.getAccessToken();
-        if (!accessToken) {
-          return res.status(500).json({ error: 'Vertex authentication failed: missing access token' });
-        }
-        headers.Authorization = `Bearer ${accessToken}`;
-      }
-
-      const resp = await fetch(vertexUrl, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload)
+    const json = await resp.json();
+    if (!resp.ok) {
+      console.error('Vertex API error:', {
+        status: resp.status,
+        statusText: resp.statusText,
+        body: json
       });
 
-      const json = await resp.json();
-      if (!resp.ok) {
-        return res.status(resp.status).json(json);
+      if (resp.status === 403) {
+        json.hint = 'Vertex returned 403. Verify the service account has “Vertex AI User” (or Generative AI User) role and the Generative Language API is enabled.';
       }
 
-      const reply = extractVertexReply(json);
-      return res.json(reply);
+      return res.status(resp.status).json(json);
     }
 
-    if (!GROQ_API_KEY) {
-      return res.status(500).json({ error: 'Server missing GROQ_API_KEY' });
-    }
-
-    const resp = await fetch(`${GROQ_API_BASE}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${GROQ_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ model, messages, temperature, max_tokens, top_p, stream })
-    });
-    const text = await resp.text();
-    if (!resp.ok) {
-      return res.status(resp.status).type('application/json').send(text);
-    }
-    res.type('application/json').send(text);
+    const reply = extractVertexReply(json);
+    return res.json(reply);
   } catch (err) {
     console.error('Error in /api/chat:', err);
     res.status(500).json({ error: 'internal_error', detail: String(err) });
@@ -137,7 +124,10 @@ function initialiseVertexAuth() {
   if (credentials) {
     const auth = new GoogleAuth({
       credentials,
-      scopes: ['https://www.googleapis.com/auth/cloud-platform']
+      scopes: [
+        'https://www.googleapis.com/auth/cloud-platform',
+        'https://www.googleapis.com/auth/generative-language'
+      ]
     });
 
     return {
@@ -263,9 +253,9 @@ function extractVertexReply(responseJson) {
 
   const text = first
     ? first.content.parts
-        .map((part) => part.text || '')
-        .join('')
-        .trim()
+      .map((part) => part.text || '')
+      .join('')
+      .trim()
     : '';
 
   return {
