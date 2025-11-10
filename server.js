@@ -1,5 +1,7 @@
 import express from 'express';
 import cors from 'cors';
+import fs from 'node:fs';
+import { GoogleAuth } from 'google-auth-library';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,7 +14,8 @@ const VERTEX_API_KEY = process.env.VERTEX_API_KEY || process.env.GOOGLE_API_KEY 
 const VERTEX_API_BASE = process.env.VERTEX_API_BASE || 'https://generativelanguage.googleapis.com/v1beta';
 const VERTEX_DEFAULT_MODEL = process.env.VERTEX_MODEL || 'gemini-1.5-flash';
 
-const CHAT_PROVIDER = (process.env.CHAT_PROVIDER || (VERTEX_API_KEY ? 'vertex' : 'groq')).toLowerCase();
+const vertexAuth = initialiseVertexAuth();
+const CHAT_PROVIDER = (process.env.CHAT_PROVIDER || (vertexAuth.mode !== 'none' ? 'vertex' : 'groq')).toLowerCase();
 
 app.use(cors({
   origin: '*',
@@ -23,10 +26,16 @@ app.use(express.json({ limit: '1mb' }));
 
 app.get('/api/health', (_req, res) => {
   const hasKey = CHAT_PROVIDER === 'vertex'
-    ? Boolean(VERTEX_API_KEY)
+    ? vertexAuth.mode !== 'none'
     : Boolean(GROQ_API_KEY);
 
-  res.json({ ok: true, service: 'hipolito-chat-backend', provider: CHAT_PROVIDER, hasKey });
+  res.json({
+    ok: true,
+    service: 'hipolito-chat-backend',
+    provider: CHAT_PROVIDER,
+    hasKey,
+    authMode: CHAT_PROVIDER === 'vertex' ? vertexAuth.mode : 'apiKey'
+  });
 });
 
 app.post('/api/chat', async (req, res) => {
@@ -36,8 +45,8 @@ app.post('/api/chat', async (req, res) => {
       return res.status(400).json({ error: 'messages array is required' });
     }
     if (CHAT_PROVIDER === 'vertex') {
-      if (!VERTEX_API_KEY) {
-        return res.status(500).json({ error: 'Server missing VERTEX_API_KEY' });
+      if (vertexAuth.mode === 'none') {
+        return res.status(500).json({ error: 'Server missing Vertex credentials' });
       }
       if (stream) {
         return res.status(400).json({ error: 'stream mode is not supported with Vertex AI' });
@@ -61,10 +70,22 @@ app.post('/api/chat', async (req, res) => {
         payload.systemInstruction = systemInstruction;
       }
 
-      const vertexUrl = `${VERTEX_API_BASE}/models/${encodeURIComponent(vertexModel)}:generateContent?key=${VERTEX_API_KEY}`;
+      let vertexUrl = `${VERTEX_API_BASE}/models/${encodeURIComponent(vertexModel)}:generateContent`;
+      const headers = { 'Content-Type': 'application/json' };
+
+      if (vertexAuth.mode === 'apiKey') {
+        vertexUrl += `?key=${vertexAuth.apiKey}`;
+      } else if (vertexAuth.mode === 'serviceAccount') {
+        const accessToken = await vertexAuth.getAccessToken();
+        if (!accessToken) {
+          return res.status(500).json({ error: 'Vertex authentication failed: missing access token' });
+        }
+        headers.Authorization = `Bearer ${accessToken}`;
+      }
+
       const resp = await fetch(vertexUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify(payload)
       });
 
@@ -104,6 +125,77 @@ app.listen(PORT, () => {
   console.log(`Chat backend listening on :${PORT}`);
 });
 
+function initialiseVertexAuth() {
+  if (VERTEX_API_KEY) {
+    return {
+      mode: 'apiKey',
+      apiKey: VERTEX_API_KEY
+    };
+  }
+
+  const credentials = loadServiceAccountCredentials();
+  if (credentials) {
+    const auth = new GoogleAuth({
+      credentials,
+      scopes: ['https://www.googleapis.com/auth/cloud-platform']
+    });
+
+    return {
+      mode: 'serviceAccount',
+      getAccessToken: async () => {
+        try {
+          const token = await auth.getAccessToken();
+          if (typeof token === 'string' && token.length > 0) {
+            return token;
+          }
+          if (token && typeof token.token === 'string') {
+            return token.token;
+          }
+          return null;
+        } catch (error) {
+          console.error('Error obtaining Vertex access token:', error);
+          return null;
+        }
+      }
+    };
+  }
+
+  return { mode: 'none' };
+}
+
+function loadServiceAccountCredentials() {
+  const inlineCredentials = process.env.VERTEX_SERVICE_ACCOUNT;
+  if (inlineCredentials) {
+    try {
+      const parsed = JSON.parse(inlineCredentials);
+      if (parsed && parsed.client_email && parsed.private_key) {
+        return parsed;
+      }
+    } catch (error) {
+      console.error('Failed to parse VERTEX_SERVICE_ACCOUNT JSON:', error);
+    }
+  }
+
+  const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  if (credentialsPath) {
+    try {
+      if (fs.existsSync(credentialsPath)) {
+        const fileContent = fs.readFileSync(credentialsPath, 'utf8');
+        const parsed = JSON.parse(fileContent);
+        if (parsed && parsed.client_email && parsed.private_key) {
+          return parsed;
+        }
+      } else {
+        console.warn(`GOOGLE_APPLICATION_CREDENTIALS points to missing file: ${credentialsPath}`);
+      }
+    } catch (error) {
+      console.error('Failed to load service account credentials from file:', error);
+    }
+  }
+
+  return null;
+}
+
 function mapMessagesToVertex(messages = []) {
   const contents = [];
   let systemInstruction;
@@ -136,7 +228,7 @@ function normaliseMessageParts(content) {
     return [{ text: '' }];
   }
   if (Array.isArray(content)) {
-    return content
+    const parts = content
       .map((item) => {
         if (typeof item === 'string') {
           return { text: item };
