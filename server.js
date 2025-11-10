@@ -56,14 +56,14 @@ app.post('/api/chat', async (req, res) => {
 
     const payload = {
       contents,
-      generationConfig: {
+      generation_config: {
         temperature,
-        topP: top_p,
-        maxOutputTokens: max_tokens
+        top_p,
+        max_output_tokens: max_tokens
       }
     };
     if (systemInstruction) {
-      payload.systemInstruction = systemInstruction;
+      payload.system_instruction = systemInstruction;
     }
 
     let vertexUrl = `${VERTEX_API_BASE}/models/${encodeURIComponent(vertexModel)}:generateContent`;
