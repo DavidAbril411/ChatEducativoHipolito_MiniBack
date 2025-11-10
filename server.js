@@ -37,7 +37,7 @@ app.get('/api/health', (_req, res) => {
 
 app.post('/api/chat', async (req, res) => {
   try {
-    const { model, messages, temperature = 0.7, max_tokens = 180, top_p = 0.9, stream = false } = req.body || {};
+    const { model, messages, temperature = 0.4, max_tokens = 500, top_p = 0.7, stream = false } = req.body || {};
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({ error: 'messages array is required' });
     }
@@ -60,7 +60,15 @@ app.post('/api/chat', async (req, res) => {
         temperature,
         topP: top_p,
         maxOutputTokens: max_tokens
-      }
+      },
+      safetySettings: [
+        { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+        { category: 'HARM_CATEGORY_HATE', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+        { category: 'HARM_CATEGORY_SEXUAL', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+        { category: 'HARM_CATEGORY_VIOLENCE', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+        { category: 'HARM_CATEGORY_SELF_HARM', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+        { category: 'HARM_CATEGORY_DANGEROUS', threshold: 'BLOCK_MEDIUM_AND_ABOVE' }
+      ]
     };
     if (systemInstructionParts.length > 0) {
       payload.systemInstruction = {
@@ -102,7 +110,7 @@ app.post('/api/chat', async (req, res) => {
 
       return res.status(resp.status).json(json);
     }
-    
+
     console.log('Vertex API raw response', JSON.stringify(json, null, 2))
     const reply = extractVertexReply(json);
     return res.json(reply);
