@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3000;
 
 // Vertex AI (Gemini) configuration
 const VERTEX_API_KEY = process.env.VERTEX_API_KEY || process.env.GOOGLE_API_KEY || process.env.VERTEX_KEY;
-const VERTEX_API_BASE = process.env.VERTEX_API_BASE || 'https://generativelanguage.googleapis.com/v1';
+const VERTEX_API_BASE = process.env.VERTEX_API_BASE || 'https://generativelanguage.googleapis.com/v1beta';
 const VERTEX_DEFAULT_MODEL = process.env.VERTEX_MODEL || 'gemini-2.5-flash';
 
 const vertexAuth = initialiseVertexAuth();
@@ -64,6 +64,7 @@ app.post('/api/chat', async (req, res) => {
     };
     if (systemInstructionParts.length > 0) {
       payload.systemInstruction = {
+        role: 'system',
         parts: systemInstructionParts
       };
     }
