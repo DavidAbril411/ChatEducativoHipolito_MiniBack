@@ -49,21 +49,23 @@ app.post('/api/chat', async (req, res) => {
     }
 
     const vertexModel = model || VERTEX_DEFAULT_MODEL;
-    const { contents, systemInstruction } = mapMessagesToVertex(messages);
+    const { contents, systemInstructionParts } = mapMessagesToVertex(messages);
     if (contents.length === 0) {
       return res.status(400).json({ error: 'Vertex requires at least one non-system message' });
     }
 
     const payload = {
       contents,
-      generation_config: {
+      generationConfig: {
         temperature,
-        top_p,
-        max_output_tokens: max_tokens
+        topP: top_p,
+        maxOutputTokens: max_tokens
       }
     };
-    if (systemInstruction) {
-      payload.system_instruction = systemInstruction;
+    if (systemInstructionParts.length > 0) {
+      payload.systemInstruction = {
+        parts: systemInstructionParts
+      };
     }
 
     let vertexUrl = `${VERTEX_API_BASE}/models/${encodeURIComponent(vertexModel)}:generateContent`;
@@ -188,7 +190,7 @@ function loadServiceAccountCredentials() {
 
 function mapMessagesToVertex(messages = []) {
   const contents = [];
-  let systemInstruction;
+  const systemInstructionParts = [];
 
   for (const msg of messages) {
     if (!msg || !msg.role) {
@@ -197,10 +199,7 @@ function mapMessagesToVertex(messages = []) {
     const parts = normaliseMessageParts(msg.content);
 
     if (msg.role === 'system') {
-      if (!systemInstruction) {
-        systemInstruction = { role: 'system', parts: [] };
-      }
-      systemInstruction.parts.push(...parts);
+      systemInstructionParts.push(...parts);
       continue;
     }
 
@@ -210,7 +209,7 @@ function mapMessagesToVertex(messages = []) {
     });
   }
 
-  return { contents, systemInstruction };
+  return { contents, systemInstructionParts };
 }
 
 function normaliseMessageParts(content) {
