@@ -102,7 +102,8 @@ app.post('/api/chat', async (req, res) => {
 
       return res.status(resp.status).json(json);
     }
-
+    
+    console.log('Vertex API raw response', JSON.stringify(json, null, 2))
     const reply = extractVertexReply(json);
     return res.json(reply);
   } catch (err) {
